@@ -1,0 +1,151 @@
+
+from typing import Callable, Union, Optional
+
+from streamlit import StopException
+from streamlit.callbacks.callbacks import _get_loop, _wrapper
+from weakref import WeakValueDictionary
+
+from tornado.websocket import WebSocketClientConnection, websocket_connect
+import threading
+import asyncio
+
+_ws_connections = WeakValueDictionary()
+_ws_connections_lock = threading.Lock()
+reconnect_time_seconds = 1.0
+
+
+class _WebsocketConnection:
+    def __init__(self, url):
+        self.url = url
+        self.callbacks = []
+        self.callbacks_empty = asyncio.Event(loop=_get_loop())
+        self.output_msg = []
+        self.output_msg_has_element = asyncio.Event(loop=_get_loop())
+        self.task = None
+
+    async def _async_connect(self):
+        empty = asyncio.ensure_future(self.callbacks_empty.wait())
+        out_msg = asyncio.ensure_future(self.output_msg_has_element.wait())
+        while len(self.callbacks) or len(self.output_msg):
+            connection = None
+            try:
+                connection = await websocket_connect(url=self.url)
+                read_msg = asyncio.ensure_future(connection.read_message())
+                while len(self.callbacks) or len(self.output_msg):
+                    done, pend = await asyncio.wait([read_msg, out_msg, empty], return_when=asyncio.FIRST_COMPLETED)
+                    for task in done:
+                        if task is read_msg:
+                            try:
+                                data = task.result()
+                            except:
+                                import traceback
+                                traceback.print_exc()
+                            else:
+                                if data is None:
+                                    raise ConnectionError("Websocket sent EOF")
+
+                                self._run_callbacks(data)
+                            read_msg = asyncio.ensure_future(connection.read_message())
+                        if task is out_msg:
+                            self._send_messages(connection)
+                            self.output_msg_has_element.clear()
+                            out_msg = asyncio.ensure_future(self.output_msg_has_element.wait())
+                        if task is empty:
+                            if len(self.callbacks) > 0:
+                                self.callbacks_empty.clear()
+                                empty = asyncio.ensure_future(self.callbacks_empty.wait())
+                connection.close()
+            except BaseException as e:
+                if connection is not None:
+                    connection.close()
+                print(f"Websocket '{self.url}' ends: {e.__class__.__name__} {e}, try to reconnect")
+                self._check_validity()
+                if len(self.callbacks) or len(self.output_msg):
+                    await asyncio.sleep(reconnect_time_seconds)
+
+        self.callbacks_empty.clear()
+        self.output_msg_has_element.clear()
+        self.task = None
+
+    def _send_messages(self, connection: WebSocketClientConnection):
+        for data, callback in self.output_msg:
+            async def write_data(d, cb):
+                try:
+                    await connection.write_message(d, isinstance(d, bytes))
+                    if cb is not None:
+                        cb()
+                except:
+                    self._check_validity(end_connection=False)
+
+            asyncio.ensure_future(write_data(data, callback))
+        self.output_msg.clear()
+
+    def _check_validity(self, end_connection: bool = True):
+        index = 0
+        while index < len(self.callbacks):
+            (callback, reconnect) = self.callbacks[index]
+            if end_connection and not reconnect:
+                del self.callbacks[index]
+                continue
+
+            try:
+                callback(args=[None], need_report=False)
+            except StopException:
+                del self.callbacks[index]
+            else:
+                index += 1
+
+        if len(self.callbacks) == 0:
+            self.callbacks_empty.set()
+
+    def _run_callbacks(self, data: Union[str, bytes]):
+        index = 0
+        while index < len(self.callbacks):
+            (callback, reconnect) = self.callbacks[index]
+            try:
+                callback(args=[data])
+            except StopException:
+                del self.callbacks[index]
+            else:
+                index += 1
+
+        if len(self.callbacks) == 0:
+            self.callbacks_empty.set()
+
+    def add_callback(self, callback: Callable[[Union[None, str, bytes]], None], reconnect: bool):
+        self.callbacks.append((callback, reconnect))
+        if self.task is None:
+            self.task = asyncio.ensure_future(self._async_connect())
+
+    def send_message(self, data: Union[str, bytes], callback: Optional[Callable[[], None]] = None):
+        self.output_msg.append((data, callback))
+        self.output_msg_has_element.set()
+        if self.task is None:
+            self.task = asyncio.ensure_future(self._async_connect())
+
+
+def _get_ws_connection(url: str):
+    _connection = _ws_connections.get(url)
+    if _connection is None:
+        with _ws_connections_lock:
+            _connection = _ws_connections.get(url)
+            if _connection is None:
+                _connection = _WebsocketConnection(url)
+                _ws_connections[url] = _connection
+    return _connection
+
+
+def on_message(url: str, callback: Callable[[Union[str, bytes]], None], key: Optional[str] = None,
+               reconnect: bool = True):
+    if key is None:
+        key = url
+
+    def callback_with_empty(data: Union[None, str, bytes]):
+        if data is not None:
+            callback(data)
+
+    _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, _wrapper(callback_with_empty, key), reconnect)
+
+
+def send_message(url: str, message: Union[str, bytes], callback: Optional[Callable[[], None]] = None):
+    _get_loop().call_soon_threadsafe(_get_ws_connection(url).send_message, message, _wrapper(callback))

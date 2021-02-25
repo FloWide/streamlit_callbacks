@@ -1,5 +1,5 @@
 
-from typing import Callable, Union, Optional
+from typing import Callable, Union, Optional, List, Tuple, Any, Dict
 
 from streamlit import StopException
 from streamlit.callbacks.callbacks import _get_loop, _wrapper
@@ -112,7 +112,12 @@ class _WebsocketConnection:
         if len(self.callbacks) == 0:
             self.callbacks_empty.set()
 
-    def add_callback(self, callback: Callable[[Union[None, str, bytes]], None], reconnect: bool):
+    def add_callback(self, callback: Callable[..., None], reconnect: bool):
+        try:
+            callback(args=[None], need_report=False)
+        except StopException:
+            return
+
         self.callbacks.append((callback, reconnect))
         if self.task is None:
             self.task = asyncio.ensure_future(self._async_connect())
@@ -145,6 +150,49 @@ def on_message(url: str, callback: Callable[[Union[str, bytes]], None], key: Opt
             callback(data)
 
     _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, _wrapper(callback_with_empty, key), reconnect)
+
+
+def on_message_buffered(url: str, callback: Callable[[List[Union[str, bytes]]], None],
+                        buffer_time: float, key: Optional[str] = None,
+                        reconnect: bool = True):
+    if key is None:
+        key = url
+
+    def callback_with_empty(data: Optional[List[Union[str, bytes]]]):
+        if data is not None:
+            callback(data)
+
+    wrapped_fun = _wrapper(callback_with_empty, key)
+
+    arg_list = []
+    prev_future = None
+
+    def outer_callback(args, *vargs, **kwargs):
+        nonlocal arg_list
+        nonlocal prev_future
+        pf = prev_future
+        if args[0] is None:
+            wrapped_fun(args=args, *vargs, **kwargs)
+        else:
+            arg_list.append(args[0])
+            if len(arg_list) == 1:
+                prev_future = asyncio.Future()
+
+                async def after(fut):
+                    nonlocal arg_list
+                    await asyncio.sleep(buffer_time)
+                    plist, arg_list = arg_list, []
+                    try:
+                        wrapped_fun(args=[plist])
+                        fut.set_result(None)
+                    except StopException as e:
+                        fut.set_exception(e)
+
+                _get_loop().create_task(after(prev_future))
+        if pf is not None and pf.done():
+            pf.result()
+
+    _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, outer_callback, reconnect)
 
 
 def send_message(url: str, message: Union[str, bytes], callback: Optional[Callable[[], None]] = None):

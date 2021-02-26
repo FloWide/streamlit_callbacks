@@ -1,14 +1,14 @@
 import asyncio
-from concurrent.futures import Future
 import functools
 import threading
 import weakref
+from concurrent.futures import Future
 from typing import Optional, Callable, Any, Tuple, List, Union, Dict
 
 from streamlit import StopException
-from streamlit.script_runner import RerunException
 from streamlit.report_session import ReportSession, ReportSessionState
 from streamlit.report_thread import get_report_ctx, add_report_ctx, ReportContext, REPORT_CONTEXT_ATTR_NAME
+from streamlit.script_runner import RerunException
 from tornado.ioloop import PeriodicCallback, IOLoop
 
 _loop: Optional[asyncio.AbstractEventLoop] = None
@@ -60,7 +60,7 @@ class _SessionState:
 
     def __init__(self, report_session: ReportSession):
         self._session = weakref.ref(report_session)
-        self._ctx: ReportContext = _getattrs(report_session, '_scriptrunner', '_script_thread', 'streamlit_report_ctx')
+        self._ctx: ReportContext = _SessionState.get_report_thread(report_session).streamlit_report_ctx
         self.callbacks = {}
 
     def refresh_ctx(self, session: Optional[ReportSession] = None):
@@ -191,6 +191,7 @@ def _wrapper(callback: Optional[Callable[..., None]], uniq_id: Optional[str] = N
             def raise_(*args, **kwargs):
                 if delegate_stop:
                     raise StopException("Already running")
+
             return raise_
     return functools.partial(_wrapped, session_state=callback_session_state, cb_ref=[callback], need_report=need_report,
                              function_ctx=report_ctx, delegate_stop=delegate_stop)
@@ -225,7 +226,8 @@ def call(cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optiona
     _get_loop().call_soon_threadsafe(_wrapper(cb, key))
 
 
-def later(delay: Union[int, float], cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optional[bool] = None):
+def later(delay: Union[int, float], cb: Callable[[], None], key: Optional[str] = None,
+          reinvokable: Optional[bool] = None):
     """
     Schedule callback to be called after the given delay number of seconds (can be either an int or a float).
     :param delay: seconds
@@ -319,6 +321,7 @@ def periodic(callback_time: Union[int, float], cb: Callable[[], None], key: Opti
                     callback()
                 except StopException:
                     self.stop()
+
             return res
 
     _get_loop().call_soon_threadsafe(functools.partial(_get_loop().call_later, delay, PeriodicCallbackHandler(

@@ -1,13 +1,11 @@
-
-from typing import Callable, Union, Optional, List, Tuple, Any, Dict
+import asyncio
+import threading
+from typing import Callable, Union, Optional, List
+from weakref import WeakValueDictionary
 
 from streamlit import StopException
 from streamlit.callbacks.callbacks import _get_loop, _wrapper
-from weakref import WeakValueDictionary
-
 from tornado.websocket import WebSocketClientConnection, websocket_connect
-import threading
-import asyncio
 
 _ws_connections = WeakValueDictionary()
 _ws_connections_lock = threading.Lock()
@@ -149,7 +147,8 @@ def on_message(url: str, callback: Callable[[Union[str, bytes]], None], key: Opt
         if data is not None:
             callback(data)
 
-    _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, _wrapper(callback_with_empty, key), reconnect)
+    _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, _wrapper(callback_with_empty, key),
+                                     reconnect)
 
 
 def on_message_buffered(url: str, callback: Callable[[List[Union[str, bytes]]], None],

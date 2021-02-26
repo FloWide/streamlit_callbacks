@@ -1,8 +1,8 @@
-
-from streamlit.report_thread import get_report_ctx
 from typing import Callable
-from streamlit.callbacks.callbacks import _wrapper
+
 import streamlit
+from streamlit.callbacks.callbacks import _wrapper
+from streamlit.report_thread import get_report_ctx
 
 sessions = {}
 

@@ -350,3 +350,19 @@ def time() -> float:
     :return: the event loop’s internal monotonic clock current time
     """
     return _get_loop().time()
+
+
+def rerun(rerun_message="Change happened", *args, **kwargs):
+    """
+    Throws an RerunException
+    :param rerun_message: this message passed to the exception
+    :return: None
+
+    Usage:
+
+    ```
+    from streamlit.callbacks.callbacks import later, rerun
+    later(5.0, rerun)
+    ```
+    """
+    raise RerunException(rerun_message)

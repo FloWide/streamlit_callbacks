@@ -20,6 +20,7 @@ class _WebsocketConnection:
         self.output_msg = []
         self.output_msg_has_element = asyncio.Event(loop=_get_loop())
         self.task = None
+        self.alive = False
 
     async def _async_connect(self):
         empty = asyncio.ensure_future(self.callbacks_empty.wait())
@@ -28,6 +29,7 @@ class _WebsocketConnection:
             connection = None
             try:
                 connection = await websocket_connect(url=self.url)
+                self.alive = True
                 read_msg = asyncio.ensure_future(connection.read_message())
                 while len(self.callbacks) or len(self.output_msg):
                     done, pend = await asyncio.wait([read_msg, out_msg, empty], return_when=asyncio.FIRST_COMPLETED)
@@ -60,6 +62,8 @@ class _WebsocketConnection:
                 self._check_validity()
                 if len(self.callbacks) or len(self.output_msg):
                     await asyncio.sleep(reconnect_time_seconds)
+            finally:
+                self.alive = False
 
         self.callbacks_empty.clear()
         self.output_msg_has_element.clear()
@@ -145,6 +149,10 @@ def _get_ws_connection(url: str):
                 _connection = _WebsocketConnection(url)
                 _ws_connections[url] = _connection
     return _connection
+
+
+def is_alive(url: str) -> bool:
+    return _get_ws_connection(url).alive
 
 
 def on_message(url: str, callback: Callable[[Union[str, bytes]], None], key: Optional[str] = None,

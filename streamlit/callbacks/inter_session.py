@@ -25,7 +25,7 @@ def on_message(callback: Callable[[str, str], None]):
     _check_sessions()
 
 
-def is_listening(session_id: str):
+def is_listening(session_id: str) -> bool:
     _check_sessions()
     return sessions.get(session_id, None) is not None
 

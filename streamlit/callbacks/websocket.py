@@ -5,7 +5,7 @@ from weakref import WeakValueDictionary
 
 from streamlit import StopException
 from streamlit.callbacks.callbacks import _get_loop, _wrapper
-from tornado.websocket import WebSocketClientConnection, websocket_connect
+from tornado.websocket import WebSocketClientConnection, websocket_connect, WebSocketClosedError
 
 _ws_connections = WeakValueDictionary()
 _ws_connections_lock = threading.Lock()
@@ -63,6 +63,12 @@ class _WebsocketConnection:
 
         self.callbacks_empty.clear()
         self.output_msg_has_element.clear()
+
+        if not empty.done():
+            empty.cancel()
+        if not out_msg.done():
+            out_msg.cancel()
+
         self.task = None
 
     def _send_messages(self, connection: WebSocketClientConnection):
@@ -70,10 +76,13 @@ class _WebsocketConnection:
             async def write_data(d, cb):
                 try:
                     await connection.write_message(d, isinstance(d, bytes))
+                except WebSocketClosedError:
                     if cb is not None:
-                        cb()
-                except:
+                        cb(args=[False])
                     self._check_validity(end_connection=False)
+                else:
+                    if cb is not None:
+                        cb(args=[True])
 
             asyncio.ensure_future(write_data(data, callback))
         self.output_msg.clear()
@@ -120,7 +129,7 @@ class _WebsocketConnection:
         if self.task is None:
             self.task = asyncio.ensure_future(self._async_connect())
 
-    def send_message(self, data: Union[str, bytes], callback: Optional[Callable[[], None]] = None):
+    def send_message(self, data: Union[str, bytes], callback: Optional[Callable[[bool], None]] = None):
         self.output_msg.append((data, callback))
         self.output_msg_has_element.set()
         if self.task is None:
@@ -170,6 +179,9 @@ def on_message_buffered(url: str, callback: Callable[[List[Union[str, bytes]]], 
         nonlocal arg_list
         nonlocal prev_future
         pf = prev_future
+        if pf is not None and pf.done():
+            pf.result()
+
         if args[0] is None:
             wrapped_fun(args=args, *vargs, **kwargs)
         else:
@@ -188,11 +200,10 @@ def on_message_buffered(url: str, callback: Callable[[List[Union[str, bytes]]], 
                         fut.set_exception(e)
 
                 _get_loop().create_task(after(prev_future))
-        if pf is not None and pf.done():
-            pf.result()
 
     _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback, outer_callback, reconnect)
 
 
-def send_message(url: str, message: Union[str, bytes], callback: Optional[Callable[[], None]] = None):
-    _get_loop().call_soon_threadsafe(_get_ws_connection(url).send_message, message, _wrapper(callback))
+def send_message(url: str, message: Union[str, bytes], callback: Optional[Callable[[bool], None]] = None):
+    _get_loop().call_soon_threadsafe(_get_ws_connection(url).send_message, message, _wrapper(callback,
+                                                                                             delegate_stop=False))

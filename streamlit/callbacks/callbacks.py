@@ -48,7 +48,17 @@ def _get_loop() -> asyncio.AbstractEventLoop:
     return _loop
 
 
+def _getattrs(obj: object, *attrs: str, default: Optional[Any] = None):
+    for attr in attrs:
+        obj = getattr(obj, attr, None)
+    return default if obj is None else obj
+
+
 class _SessionState:
+    @staticmethod
+    def get_report_session_from_ctx(report_ctx: ReportContext):
+        return _getattrs(report_ctx, '_enqueue', '__self__')
+
     @staticmethod
     def get_report_thread(rsession: ReportSession):
         return _getattrs(rsession, '_scriptrunner', '_script_thread')
@@ -88,14 +98,9 @@ class _SessionState:
         return self.get_session_with_state()[0]
 
 
-def _getattrs(obj: object, *attrs: str, default: Optional[Any] = None):
-    for attr in attrs:
-        obj = getattr(obj, attr, None)
-    return default if obj is None else obj
-
-
 def _wrapped(session_state: _SessionState,
-             cb_ref: Union[str, List[Callable[..., Any]]], need_report: bool = False,
+             cb_ref: Union[str, List[Callable[..., Any]]],
+             need_report: bool = False,
              function_ctx: Optional[ReportContext] = None,
              delegate_stop: bool = True,
              args: Optional[List[Any]] = None,
@@ -166,10 +171,10 @@ def _wrapped(session_state: _SessionState,
 def _wrapper(callback: Optional[Callable[..., None]], uniq_id: Optional[str] = None, need_report: bool = True,
              delegate_stop: bool = True):
     if callback is None:
-        return functools.partial(_wrapper, uniq_id=uniq_id, need_report=need_report)
+        return functools.partial(_wrapper, uniq_id=uniq_id, need_report=need_report, delegate_stop=delegate_stop)
 
     report_ctx = get_report_ctx()
-    report_session: ReportSession = _getattrs(report_ctx, '_enqueue', '__self__')
+    report_session: ReportSession = _SessionState.get_report_session_from_ctx(report_ctx)
     if report_session is None:
         raise StopException("No report session")
 

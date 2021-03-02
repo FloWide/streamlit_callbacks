@@ -2,6 +2,7 @@ import asyncio
 import functools
 import threading
 import weakref
+from _weakref import ReferenceType
 from concurrent.futures import Future
 from typing import Optional, Callable, Any, Tuple, List, Union, Dict
 
@@ -69,39 +70,44 @@ class _SessionState:
         getattr(rsession, '_enqueue_session_state_changed_message')()
 
     def __init__(self, report_session: ReportSession):
-        self._session = weakref.ref(report_session)
-        self._ctx: ReportContext = _SessionState.get_report_thread(report_session).streamlit_report_ctx
+        self._session = report_session
+        self._ctx: ReportContext = _SessionState.get_report_thread(self._session).streamlit_report_ctx
         self.callbacks = {}
+        self.at_end = {}
 
-    def refresh_ctx(self, session: Optional[ReportSession] = None):
-        if session is None:
-            session = self.get_session()
-
-        ctx: ReportContext = getattr(_SessionState.get_report_thread(session), 'streamlit_report_ctx', None)
+    def refresh_ctx(self):
+        ctx: ReportContext = getattr(_SessionState.get_report_thread(self._session), 'streamlit_report_ctx', None)
         if ctx is not None:
             self._ctx = ctx
 
-    def get_ctx(self, session: Optional[ReportSession] = None):
-        self.refresh_ctx(session)
+    def get_ctx(self):
+        self.refresh_ctx()
         return self._ctx
 
-    def get_session_with_state(self) -> Tuple[ReportSession, ReportSessionState]:
-        session: ReportSession = self._session()
-        if session is None:
-            raise StopException("No report session")
-        state: ReportSessionState = getattr(session, '_state')
+    def get_session_state(self) -> ReportSessionState:
+        state: ReportSessionState = getattr(self._session, '_state')
         if state == ReportSessionState.SHUTDOWN_REQUESTED:
             raise StopException("Report session shutdown")
-        return session, state
+        return state
 
     def get_session(self) -> ReportSession:
-        return self.get_session_with_state()[0]
+        return self._session
+
+    def regist_at_end(self, at_end: Callable[[], None], session: bool = True):
+        self.at_end = {k: v for k, v in self.at_end.items() if v.alive}
+        if at_end is None:
+            return
+        fun_repr = f"{repr(at_end)} - {session}"
+        pre_finalize = self.at_end.get(fun_repr)
+        if pre_finalize is not None:
+            pre_finalize()
+
+        self.at_end[fun_repr] = weakref.finalize(self._session if session else self._ctx, at_end)
 
 
-def _wrapped(session_state: _SessionState,
-             cb_ref: Union[str, List[Callable[..., Any]]],
+def _wrapped(session_state_ref: 'ReferenceType[_SessionState]',
+             cb_ref: Union[str, List[Tuple[Callable[..., Any], 'ReferenceType[_SessionState]']]],
              need_report: bool = False,
-             function_ctx: Optional[ReportContext] = None,
              delegate_stop: bool = True,
              args: Optional[List[Any]] = None,
              kwargs: Optional[Dict[Any, Any]] = None):
@@ -110,22 +116,32 @@ def _wrapped(session_state: _SessionState,
     if kwargs is None:
         kwargs = {}
 
-    fun = None
+    session_state = session_state_ref()
+    if session_state is None:
+        if delegate_stop:
+            raise StopException("No session state")
+        return
+
+    fun, function_ctx_ref = None, None
     if isinstance(cb_ref, str):
-        fun, function_ctx = session_state.callbacks.get(cb_ref, (None, None))
+        fun, function_ctx_ref = session_state.callbacks.get(cb_ref, (None, None))
     elif len(cb_ref):
-        fun = cb_ref[0]
+        fun, function_ctx_ref = cb_ref[0] if len(cb_ref) else (None, None)
     if fun is None:
         raise StopException("Deleted function, probably not delegated stop, or not handled")
+    function_ctx = function_ctx_ref()
 
     thread = threading.current_thread()
     orig_ctx = getattr(thread, REPORT_CONTEXT_ATTR_NAME, None)
     set_other_ctx = False
-    rsession = None
+    rsession = session_state.get_session()
     rerun = False
     try:
-        rsession, rstate = session_state.get_session_with_state()
-        current_ctx = session_state.get_ctx(rsession)
+        if function_ctx is None:
+            raise StopException("No function context")
+
+        rstate = session_state.get_session_state()
+        current_ctx = session_state.get_ctx()
         if current_ctx != function_ctx:
             raise StopException("Other context")
 
@@ -168,10 +184,15 @@ def _wrapped(session_state: _SessionState,
                 add_report_ctx(thread=thread, ctx=orig_ctx)
 
 
-def _wrapper(callback: Optional[Callable[..., None]], uniq_id: Optional[str] = None, need_report: bool = True,
-             delegate_stop: bool = True):
+def _wrapper(callback: Optional[Callable[..., None]],
+             uniq_id: Optional[str] = None,
+             need_report: bool = True,
+             delegate_stop: bool = True,
+             at_end: Optional[Callable[[], None]] = None,
+             out_wrapper: Callable[[Callable[..., None]], Callable[..., None]] = lambda i: i):
     if callback is None:
-        return functools.partial(_wrapper, uniq_id=uniq_id, need_report=need_report, delegate_stop=delegate_stop)
+        return functools.partial(_wrapper, uniq_id=uniq_id, need_report=need_report, delegate_stop=delegate_stop,
+                                 at_end=at_end, out_wrapper=out_wrapper)
 
     report_ctx = get_report_ctx()
     report_session: ReportSession = _SessionState.get_report_session_from_ctx(report_ctx)
@@ -187,22 +208,29 @@ def _wrapper(callback: Optional[Callable[..., None]], uniq_id: Optional[str] = N
 
     if uniq_id is not None:
         pre_callback = callback_session_state.callbacks.get(uniq_id)
-        callback_session_state.callbacks[uniq_id] = (callback, report_ctx)
+        callback_session_state.callbacks[uniq_id] = (callback, weakref.ref(report_ctx))
         if pre_callback is None:
-            return functools.partial(_wrapped, session_state=callback_session_state,
-                                     cb_ref=uniq_id, need_report=need_report,
-                                     delegate_stop=delegate_stop)
+            callback_session_state.regist_at_end(at_end, session=True)
+            return out_wrapper(functools.partial(_wrapped,
+                                                 session_state_ref=weakref.ref(callback_session_state),
+                                                 cb_ref=uniq_id,
+                                                 need_report=need_report,
+                                                 delegate_stop=delegate_stop))
         else:
             def raise_(*args, **kwargs):
                 if delegate_stop:
                     raise StopException("Already running")
 
             return raise_
-    return functools.partial(_wrapped, session_state=callback_session_state, cb_ref=[callback], need_report=need_report,
-                             function_ctx=report_ctx, delegate_stop=delegate_stop)
+    callback_session_state.regist_at_end(at_end, session=False)
+    return out_wrapper(functools.partial(_wrapped,
+                                         session_state_ref=weakref.ref(callback_session_state),
+                                         cb_ref=[(callback, weakref.ref(report_ctx))],
+                                         need_report=need_report,
+                                         delegate_stop=delegate_stop))
 
 
-def call(cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optional[bool] = None):
+def call(cb: Callable[..., None], *args, key: Optional[str] = None, reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule the callback to be called with args arguments at the next iteration of the event loop.
     :param cb: callback will be called exactly once.
@@ -213,6 +241,7 @@ def call(cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optiona
     if key is not None:
         key = "later_" + key
 
+    cb = functools.partial(cb, *args, **kwargs)
     if reinvokable is True:
         if key is None:
             raise RuntimeError("Reinvokable can be used only with key")
@@ -228,11 +257,11 @@ def call(cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optiona
 
         cb = stopped_callback
 
-    _get_loop().call_soon_threadsafe(_wrapper(cb, key))
+    _get_loop().call_soon_threadsafe(_wrapper(cb, key, delegate_stop=False))
 
 
-def later(delay: Union[int, float], cb: Callable[[], None], key: Optional[str] = None,
-          reinvokable: Optional[bool] = None):
+def later(delay: Union[int, float], cb: Callable[..., None], *args, key: Optional[str] = None,
+          reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule callback to be called after the given delay number of seconds (can be either an int or a float).
     :param delay: seconds
@@ -244,6 +273,7 @@ def later(delay: Union[int, float], cb: Callable[[], None], key: Optional[str] =
     if key is not None:
         key = "later_" + key
 
+    cb = functools.partial(cb, *args, **kwargs)
     if reinvokable is True:
         if key is None:
             raise RuntimeError("Reinvokable can be used only with key")
@@ -263,7 +293,8 @@ def later(delay: Union[int, float], cb: Callable[[], None], key: Optional[str] =
                                                                                                delegate_stop=False)))
 
 
-def at(when: Union[int, float], cb: Callable[[], None], key: Optional[str] = None, reinvokable: Optional[bool] = None):
+def at(when: Union[int, float], cb: Callable[[], None],
+       *args, key: Optional[str] = None, reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule callback to be called at the given absolute timestamp when (an int or a float),
         using the same time reference as callbacks.time().
@@ -276,6 +307,7 @@ def at(when: Union[int, float], cb: Callable[[], None], key: Optional[str] = Non
     if key is not None:
         key = "at_" + key
 
+    cb = functools.partial(cb, *args, **kwargs)
     if reinvokable is True:
         if key is None:
             raise RuntimeError("Reinvokable can be used only with key")
@@ -295,8 +327,8 @@ def at(when: Union[int, float], cb: Callable[[], None], key: Optional[str] = Non
                                                                                            delegate_stop=False)))
 
 
-def periodic(callback_time: Union[int, float], cb: Callable[[], None], key: Optional[str] = None,
-             delay: Union[int, float] = 0):
+def periodic(callback_time: Union[int, float], cb: Callable[..., None], *args, key: Optional[str] = None,
+             delay: Union[int, float] = 0, **kwargs):
     """
     Schedules the given callback to be called periodically.
 
@@ -315,8 +347,9 @@ def periodic(callback_time: Union[int, float], cb: Callable[[], None], key: Opti
         key = "periodic_" + key
 
     class PeriodicCallbackHandler:
-        def __init__(self, callback: Callable[[], None], callback_time_millis: float):
-            periodic_cb = PeriodicCallback(self.wrapped(callback), callback_time_millis)
+        def __init__(self, callback_time_millis: float):
+            periodic_cb = PeriodicCallback(self.wrapped(_wrapper(functools.partial(cb, *args, **kwargs), key,
+                                                                 at_end=self.stop)), callback_time_millis)
             self.stop = periodic_cb.stop
             self.start = periodic_cb.start
 
@@ -329,8 +362,8 @@ def periodic(callback_time: Union[int, float], cb: Callable[[], None], key: Opti
 
             return res
 
-    _get_loop().call_soon_threadsafe(functools.partial(_get_loop().call_later, delay, PeriodicCallbackHandler(
-        _wrapper(cb, key), callback_time * 1000).start))
+    _get_loop().call_soon_threadsafe(functools.partial(_get_loop().call_later, delay,
+                                                       PeriodicCallbackHandler(callback_time * 1000).start))
 
 
 def clear():
@@ -354,7 +387,7 @@ def time() -> float:
 
 def rerun(rerun_message="Change happened", *args, **kwargs):
     """
-    Throws an RerunException
+    Throws a RerunException
     :param rerun_message: this message passed to the exception
     :return: None
 

@@ -118,7 +118,7 @@ def on_message(url: str, callback: Callable[[Union[str, bytes]], None], key: Opt
 
     _get_loop().call_soon_threadsafe(_get_ws_connection(url).add_callback,
                                      _wrapper(callback_with_empty, key,
-                                              at_end=_get_ws_connection(url).at_end_threadsafe),
+                                              at_end=_get_ws_connection(url).threadsafe_at_end),
                                      reconnect)
 
 

@@ -350,15 +350,18 @@ def periodic(callback_time: Union[int, float], cb: Callable[..., None], *args, k
         def __init__(self, callback_time_millis: float):
             periodic_cb = PeriodicCallback(self.wrapped(_wrapper(functools.partial(cb, *args, **kwargs), key,
                                                                  at_end=self.stop)), callback_time_millis)
-            self.stop = periodic_cb.stop
+            self._stop = periodic_cb.stop
             self.start = periodic_cb.start
+
+        def stop(self):
+            self._stop()
 
         def wrapped(self, callback: Callable[[], None]):
             def res():
                 try:
                     callback()
                 except StopException:
-                    self.stop()
+                    self._stop()
 
             return res
 

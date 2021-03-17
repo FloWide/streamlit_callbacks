@@ -7,8 +7,10 @@ from concurrent.futures import Future
 from typing import Optional, Callable, Any, Tuple, List, Union, Dict
 
 from streamlit import StopException
+from streamlit.proto.WidgetStates_pb2 import WidgetStates
 from streamlit.report_session import ReportSession, ReportSessionState
 from streamlit.report_thread import get_report_ctx, add_report_ctx, ReportContext, REPORT_CONTEXT_ATTR_NAME
+from streamlit.script_request_queue import RerunData
 from streamlit.script_runner import RerunException
 from tornado.ioloop import PeriodicCallback, IOLoop
 
@@ -17,8 +19,10 @@ _loop_lock = threading.Lock()
 _thread: Optional[threading.Thread] = None
 
 
-class _RerunAndStopException(StopException):
-    pass
+class _RerunAndStopException(StopException, RerunException):
+    def __init__(self, rerun_data):
+        StopException.__init__(self)
+        RerunException.__init__(self, rerun_data=rerun_data)
 
 
 def _run(fut: Future):
@@ -135,7 +139,7 @@ def _wrapped(session_state_ref: 'ReferenceType[_SessionState]',
     orig_ctx = getattr(thread, REPORT_CONTEXT_ATTR_NAME, None)
     set_other_ctx = False
     rsession = session_state.get_session()
-    rerun = False
+    rerun = None
     try:
         if function_ctx is None:
             raise StopException("No function context")
@@ -159,7 +163,7 @@ def _wrapped(session_state_ref: 'ReferenceType[_SessionState]',
                 _SessionState.set_state(rsession, ReportSessionState.REPORT_NOT_RUNNING)
     except StopException as e:
         if isinstance(e, _RerunAndStopException):
-            rerun = True
+            rerun = e.rerun_data
 
         if isinstance(cb_ref, str):
             del session_state.callbacks[cb_ref]
@@ -167,15 +171,15 @@ def _wrapped(session_state_ref: 'ReferenceType[_SessionState]',
             del cb_ref[0]
         if delegate_stop:
             raise
-    except RerunException:
-        rerun = True
+    except RerunException as e:
+        rerun = e.rerun_data
     except BaseException:
         import traceback
         traceback.print_exc()
         raise
     finally:
         if rerun:
-            rsession.request_rerun(getattr(rsession, '_client_state'))
+            rsession.request_rerun(rerun)
 
         if set_other_ctx:
             if orig_ctx is None:
@@ -250,8 +254,8 @@ def call(cb: Callable[..., None], *args, key: Optional[str] = None, reinvokable:
         def stopped_callback():
             try:
                 orig_cb()
-            except RerunException:
-                raise _RerunAndStopException("Reinvoke")
+            except RerunException as re:
+                raise _RerunAndStopException(re.rerun_data)
             else:
                 raise StopException("Reinvoke")
 
@@ -282,8 +286,8 @@ def later(delay: Union[int, float], cb: Callable[..., None], *args, key: Optiona
         def stopped_callback():
             try:
                 orig_cb()
-            except RerunException:
-                raise _RerunAndStopException("Reinvoke")
+            except RerunException as re:
+                raise _RerunAndStopException(re.rerun_data)
             else:
                 raise StopException("Reinvoke")
 
@@ -316,8 +320,8 @@ def at(when: Union[int, float], cb: Callable[[], None],
         def stopped_callback():
             try:
                 orig_cb()
-            except RerunException:
-                raise _RerunAndStopException("Reinvoke")
+            except RerunException as re:
+                raise _RerunAndStopException(re.rerun_data)
             else:
                 raise StopException("Reinvoke")
 
@@ -388,10 +392,9 @@ def time() -> float:
     return _get_loop().time()
 
 
-def rerun(rerun_message="Change happened", *args, **kwargs):
+def rerun(*args, **kwargs):
     """
     Throws a RerunException
-    :param rerun_message: this message passed to the exception
     :return: None
 
     Usage:
@@ -401,4 +404,7 @@ def rerun(rerun_message="Change happened", *args, **kwargs):
     later(5.0, rerun)
     ```
     """
-    raise RerunException(rerun_message)
+    report_ctx = get_report_ctx()
+    wstates = WidgetStates()
+    wstates.widgets.extend(report_ctx.widgets._state.values())
+    raise RerunException(RerunData(report_ctx.query_string, wstates))

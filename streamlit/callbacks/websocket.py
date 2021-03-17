@@ -9,7 +9,7 @@ from streamlit import StopException
 from streamlit.callbacks.base_connection import _BaseConnection, _TimeBuffering
 from streamlit.callbacks.callbacks import _get_loop, _wrapper
 from streamlit.script_runner import RerunException
-from tornado.websocket import websocket_connect, WebSocketClosedError
+from tornado.websocket import websocket_connect, WebSocketClosedError, WebSocketClientConnection
 
 _ws_connections = WeakValueDictionary()
 _ws_connections_lock = threading.Lock()
@@ -33,7 +33,7 @@ class _WebsocketConnection(_BaseConnection):
     def _connect(self) -> Awaitable:
         return websocket_connect(url=self.address)
 
-    def _send_messages(self, connection, messages):
+    def _send_messages(self, connection: WebSocketClientConnection, messages):
         if connection is None:
             for data, callback in messages:
                 try:
@@ -45,14 +45,16 @@ class _WebsocketConnection(_BaseConnection):
         for data, callback in messages:
             async def write_data(d, cb):
                 try:
-                    await connection.write_message(d, isinstance(d, bytes))
+                    if connection.protocol is not None:
+                        await connection.write_message(d, isinstance(d, bytes))
+                        if cb is not None:
+                            cb(args=[True])
+                    else:
+                        self.add_message(d, cb)
                 except WebSocketClosedError:
                     if cb is not None:
                         cb(args=[False])
                     self.at_end()
-                else:
-                    if cb is not None:
-                        cb(args=[True])
 
             asyncio.ensure_future(write_data(data, callback))
 

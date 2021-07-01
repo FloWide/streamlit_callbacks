@@ -1,17 +1,17 @@
 import asyncio
 import functools
-import itertools
 import operator
 import threading
 from typing import Tuple, Callable, Union, Optional, List, Awaitable, Pattern
 from weakref import WeakValueDictionary
+
 import aioredis
 from aioredis import Redis, RedisError
 from streamlit import StopException
-from streamlit.callbacks.base_connection import _BaseConnection, _TimeBuffering
-
-from streamlit.callbacks.callbacks import _wrapper, _get_loop
 from streamlit.script_runner import RerunException
+
+from .base_connection import _BaseConnection, _TimeBuffering
+from .callbacks import _wrapper, _get_loop
 
 _redis_connections = WeakValueDictionary()
 _redis_connections_lock = threading.Lock()

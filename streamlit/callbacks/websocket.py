@@ -6,8 +6,8 @@ from typing import Callable, Union, Optional, List, Awaitable, Tuple
 from weakref import WeakValueDictionary
 
 from streamlit import StopException
-from streamlit.callbacks.base_connection import _BaseConnection, _TimeBuffering
-from streamlit.callbacks.callbacks import _get_loop, _wrapper
+from .base_connection import _BaseConnection, _TimeBuffering
+from .callbacks import _get_loop, _wrapper
 from streamlit.script_runner import RerunException
 from tornado.websocket import websocket_connect, WebSocketClosedError, WebSocketClientConnection
 

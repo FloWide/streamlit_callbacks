@@ -4,7 +4,7 @@ from asyncio import Future
 from typing import Awaitable, Tuple, Union, List, Optional, Dict, Any, Callable
 
 from streamlit import StopException
-from streamlit.callbacks.callbacks import _get_loop
+from .callbacks import _get_loop
 
 
 class _BaseConnection(ABC):

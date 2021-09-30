@@ -2,7 +2,7 @@ import setuptools
 
 setuptools.setup(
     name="streamlit_callbacks",
-    version="0.0.4",
+    version="0.0.5",
     author="",
     author_email="",
     description="",

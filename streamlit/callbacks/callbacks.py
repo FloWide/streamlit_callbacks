@@ -6,11 +6,9 @@ from _weakref import ReferenceType
 from concurrent.futures import Future
 from typing import Optional, Callable, Any, Tuple, List, Union, Dict
 
-from streamlit import StopException
-from streamlit.proto.WidgetStates_pb2 import WidgetStates
+from streamlit import StopException, experimental_rerun
 from streamlit.report_session import ReportSession, ReportSessionState
 from streamlit.report_thread import get_report_ctx, add_report_ctx, ReportContext, REPORT_CONTEXT_ATTR_NAME
-from streamlit.script_request_queue import RerunData
 from streamlit.script_runner import RerunException
 from tornado.ioloop import PeriodicCallback, IOLoop
 
@@ -234,7 +232,23 @@ def _wrapper(callback: Optional[Callable[..., None]],
                                          delegate_stop=delegate_stop))
 
 
-def call(cb: Callable[..., None], *args, key: Optional[str] = None, reinvokable: Optional[bool] = None, **kwargs):
+def rerun(*args, **kwargs):
+    """
+    Throws a RerunException
+    :return: None
+
+    Usage:
+
+    ```
+    from streamlit.callbacks.callbacks import later, rerun
+    later(5.0, rerun)
+    ```
+    """
+
+    raise experimental_rerun()
+
+
+def call(cb: Callable[..., None] = rerun, *args, key: Optional[str] = None, reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule the callback to be called with args arguments at the next iteration of the event loop.
     :param cb: callback will be called exactly once.
@@ -243,7 +257,7 @@ def call(cb: Callable[..., None], *args, key: Optional[str] = None, reinvokable:
     :return: None
     """
     if key is not None:
-        key = "later_" + key
+        key = "call_" + key
 
     cb = functools.partial(cb, *args, **kwargs)
     if reinvokable is True:
@@ -264,7 +278,7 @@ def call(cb: Callable[..., None], *args, key: Optional[str] = None, reinvokable:
     _get_loop().call_soon_threadsafe(_wrapper(cb, key, delegate_stop=False))
 
 
-def later(delay: Union[int, float], cb: Callable[..., None], *args, key: Optional[str] = None,
+def later(delay: Union[int, float], cb: Callable[..., None] = rerun, *args, key: Optional[str] = None,
           reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule callback to be called after the given delay number of seconds (can be either an int or a float).
@@ -297,7 +311,7 @@ def later(delay: Union[int, float], cb: Callable[..., None], *args, key: Optiona
                                                                                                delegate_stop=False)))
 
 
-def at(when: Union[int, float], cb: Callable[[], None],
+def at(when: Union[int, float], cb: Callable[[], None] = rerun,
        *args, key: Optional[str] = None, reinvokable: Optional[bool] = None, **kwargs):
     """
     Schedule callback to be called at the given absolute timestamp when (an int or a float),
@@ -331,7 +345,7 @@ def at(when: Union[int, float], cb: Callable[[], None],
                                                                                            delegate_stop=False)))
 
 
-def periodic(callback_time: Union[int, float], cb: Callable[..., None], *args, key: Optional[str] = None,
+def periodic(callback_time: Union[int, float], cb: Callable[..., None] = rerun, *args, key: Optional[str] = None,
              delay: Union[int, float] = 0, **kwargs):
     """
     Schedules the given callback to be called periodically.
@@ -390,21 +404,3 @@ def time() -> float:
     :return: the event loop’s internal monotonic clock current time
     """
     return _get_loop().time()
-
-
-def rerun(*args, **kwargs):
-    """
-    Throws a RerunException
-    :return: None
-
-    Usage:
-
-    ```
-    from streamlit.callbacks.callbacks import later, rerun
-    later(5.0, rerun)
-    ```
-    """
-    report_ctx = get_report_ctx()
-    wstates = WidgetStates()
-    wstates.widgets.extend(report_ctx.widgets._state.values())
-    raise RerunException(RerunData(report_ctx.query_string, wstates))
